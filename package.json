@@ -1,0 +1,21 @@
+{
+  "name": "apns-feedback-manager",
+  "version": "0.0.1",
+  "description": "Periodically check and store APNS feedback",
+  "main": "checker.js",
+  "scripts": {
+    "test": "mocha"
+  },
+  "dependencies": {
+      "apns-feedback": "file://../apns-feedback"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/incredible-labs/apns-feedback-manager.git"
+  },
+  "keywords": [
+    "apns"
+  ],
+  "author": "jbl",
+  "license": "BSD"
+}
