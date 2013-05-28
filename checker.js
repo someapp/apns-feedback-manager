@@ -4,8 +4,12 @@ var async = require("async");
 var fs = require("fs");
 var redis = require('redis');
 var async = require("async");
+var http = require("http");
 var client = redis.createClient(6499);
+var URL = require('url');
+
 var clients = {};
+var CHECK_PERIOD = 1000 * 60 * 60 * 6;
 
 function Checker(opts) {
     this.dataFile = opts.dataFile;
@@ -77,7 +81,21 @@ var storeResults = function(err, results, key, callback) {
         }
         var now = Date.now();
         async.forEach(results, function(result, done) {
-            client.zadd('apns_feedback:'+key, now, JSON.stringify(result), done);
+            result.expired_at = result.expired_at * 1000;
+            async.series([
+                function(done) {
+                    client.zadd('apns_feedback:'+key, now, JSON.stringify(result), function(err) {
+                        if(err) console.log(err);
+                        done();
+                    });
+                },
+                function(done) {
+                    client.zadd('apns_feedback:any', now, JSON.stringify(result), function(err) {
+                        if(err) console.log(err);
+                        done();
+                    });
+                }], done);
+
         }, callback);
 };
 
@@ -94,14 +112,80 @@ function checkAndStore(domain, isDevelopment, callback) {
 
 var modes = ['production', 'development'];
 var app_ids = ['io.incredible.DoHome', 'io.incredible.DoHomeInternal', 'io.incredible.donna'];
+function doAllChecks(callback) {
+    async.forEach(modes, function(mode, done) {
+        async.forEach(app_ids, function(app_id, done) {
+            async.forEach([true, false], function(isDevelopment, done) {
+                checkAndStore(mode+"-"+app_id, isDevelopment, done);
+            }, done); 
+        }, done);
+    }, function() {
+        client.set('last_check', Date.now(), function(err) {
+            if(err) console.log(err);
+            callback(err);
+        });
+    });
+}
 
-async.forEach(modes, function(mode, done) {
-    async.forEach(app_ids, function(app_id, done) {
-        async.forEach([true, false], function(isDevelopment, done) {
-            checkAndStore(mode+"-"+app_id, isDevelopment, done);
-        }, done); 
-    }, done);
-}, function(err) {
-    if(err) console.log(err);
-    process.exit(-1);
-});
+function writeError(res, err) {
+    res.writeHead(500, {'Content-Type': 'text/plain'});
+    res.write(err.message);
+}
+
+function writeJSON(res, obj) {
+    res.writeHead(200, {'Content-TYpe': 'application/json'});
+    res.write(JSON.stringify(obj));
+}
+
+function notfound(res) {
+    res.writeHead(404, {'Content-Type': 'text/plain'});
+    res.write("Not found");
+    res.end();
+}
+http.createServer(function(req, res) {
+    console.log("Request from: "+req.url);
+    var url = URL.parse(req.url, true);
+    console.log(url);
+    if(url.pathname != '/get') return notfound(res);
+
+    var since = url.query.since || 0;
+    var force = !!url.query.force;
+    console.log("FORCE: "+force);
+    async.waterfall([
+        function checkTime(next) {
+            client.get('last_check', next);
+        },
+        function(last_check, next) {
+            if(!force && ((Date.now() - last_check) < CHECK_PERIOD)) return next();
+            doAllChecks(next);
+        },
+        function(next) {
+            console.log("zrangeby score "+since+", "+Date.now());
+            client.zrangebyscore('apns_feedback:any', since, Date.now(), function(err, results) {
+                if(err) return next(err);
+                results = results || [];
+                for(var i = 0; i < results.length; i++) {
+                    console.log("Parsing: "+results[i]);
+                    try {
+                        results[i] = JSON.parse(results[i]);
+                    } catch(err) {
+                        results[i] = {
+                            unparseable: results[i]
+                        };
+                    }
+                }
+                next(err, results);
+            }); 
+        }
+    ], function(err, results) {
+        console.log(results);
+        if(err) {
+            writeError(res, err);
+            res.end();
+        } else {
+            writeJSON(res, results);
+            res.end();
+        }
+    }); 
+}).listen(6789);
+
